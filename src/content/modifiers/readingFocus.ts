@@ -4,9 +4,8 @@ const CONTAINER_ID = 'lexilens-reading-focus-container';
 const MAGNIFIER_ID = 'lexilens-reading-focus-magnifier';
 
 let isEnabled = false;
-let anchorRange: Range | null = null;
 let activeRange: Range | null = null;
-let updateTimer: number | null = null;
+let isSessionActive = false;
 
 // Track the current highlight rect to smooth transitions
 let currentRect = { top: 0, left: 0, width: 0, height: 0, set: false };
@@ -154,15 +153,10 @@ function updateHole(targetRect: DOMRect) {
         magnifier.style.height = `${bottom - top}px`;
 
         // Update Content: check if content changed string-wise to avoid re-cloning if unnecessary
-        // Actually re-cloning every frame is expensive? 
-        // User scans words, so content updates often.
-        // But animation frames are 60fps.
         const text = activeRange.toString();
         if (magnifier.dataset.lastText !== text) {
             magnifier.innerHTML = '';
             // We can use textContent for simplicity, or cloneContents for HTML support.
-            // cloneContents is better for bold/italic.
-            // BUT cloneContents fragments don't have styles computed.
             magnifier.textContent = text;
             magnifier.dataset.lastText = text;
 
@@ -171,13 +165,10 @@ function updateHole(targetRect: DOMRect) {
             if (sourceNode) {
                 const comp = window.getComputedStyle(sourceNode);
                 magnifier.style.fontFamily = comp.fontFamily;
-                magnifier.style.fontSize = comp.fontSize; // Might need scaling further? 
+                magnifier.style.fontSize = comp.fontSize;
                 magnifier.style.fontWeight = comp.fontWeight;
                 magnifier.style.lineHeight = comp.lineHeight;
                 magnifier.style.letterSpacing = comp.letterSpacing;
-                // If page is dark mode, text might be white. 
-                // Our magnifier bg is white. So force text black?
-                // Or detect. Let's simplify: Force black text on white bg for contrast/dyslexia.
                 magnifier.style.color = '#000000';
             }
         }
@@ -218,40 +209,21 @@ function getWordRangeAtPoint(x: number, y: number): Range | null {
     return null;
 }
 
-function handleMouseMove(e: MouseEvent) {
-    const range = getWordRangeAtPoint(e.clientX, e.clientY);
+function processMouseMove(x: number, y: number) {
+    if (!isSessionActive) return;
+
+    const range = getWordRangeAtPoint(x, y);
 
     if (!range) {
-        if (activeRange) {
-            if (updateTimer) clearTimeout(updateTimer);
-            updateTimer = window.setTimeout(resetFocus, 100);
-        }
+        // Optional: Hide overlay when off-text while active? 
+        // Or keep it at last known word to avoid flickering.
+        // Let's hide it for cleaner feel.
+        const container = document.getElementById(CONTAINER_ID);
+        if (container) container.classList.remove('active');
         return;
     }
 
-    if (updateTimer) {
-        clearTimeout(updateTimer);
-        updateTimer = null;
-    }
-
-    if (!anchorRange) {
-        anchorRange = range;
-    }
-
-    const compareStart = range.compareBoundaryPoints(Range.START_TO_START, anchorRange);
-
-    const unionRange = document.createRange();
-
-    if (compareStart <= 0) {
-        unionRange.setStart(range.startContainer, range.startOffset);
-        unionRange.setEnd(anchorRange.endContainer, anchorRange.endOffset);
-    } else {
-        unionRange.setStart(anchorRange.startContainer, anchorRange.startOffset);
-        unionRange.setEnd(range.endContainer, range.endOffset);
-    }
-
-    activeRange = unionRange;
-
+    activeRange = range;
     const rect = activeRange.getBoundingClientRect();
 
     if (rect.width === 0) return;
@@ -259,9 +231,46 @@ function handleMouseMove(e: MouseEvent) {
     requestAnimationFrame(() => updateHole(rect));
 }
 
+function handleMouseMove(e: MouseEvent) {
+    if (!isSessionActive) return;
+    processMouseMove(e.clientX, e.clientY);
+}
+
+
+function handleClick(e: MouseEvent) {
+    // Only intercept if we are enabled
+    if (!isEnabled) return;
+
+    // Ignore clicks on our own UI
+    const target = e.target as Element;
+    if (target.closest('#lexilens-root') ||
+        target.closest('.lexilens-widget') ||
+        target.closest('#lexilens-panel-root') ||
+        target.closest('#lexilens-reading-focus-container')) {
+        return;
+    }
+
+    // Toggle session
+    e.preventDefault();
+    e.stopPropagation();
+
+    isSessionActive = !isSessionActive;
+
+    if (isSessionActive) {
+        // Start immediately
+        processMouseMove(e.clientX, e.clientY);
+    } else {
+        // Stop
+        resetFocus();
+        // Force removal of active class to be sure
+        const container = document.getElementById(CONTAINER_ID);
+        if (container) container.classList.remove('active');
+    }
+}
+
 function resetFocus() {
-    anchorRange = null;
     activeRange = null;
+    isSessionActive = false;
     const container = document.getElementById(CONTAINER_ID);
     const magnifier = document.getElementById(MAGNIFIER_ID);
     if (container) {
@@ -277,12 +286,16 @@ export function enableReadingFocus() {
     if (isEnabled) return;
     isEnabled = true;
     createOverlay();
+    // Use capture to try and intercept clicks before links
+    document.addEventListener('click', handleClick, { capture: true });
     document.addEventListener('mousemove', handleMouseMove, { passive: true });
 }
 
 export function disableReadingFocus() {
     if (!isEnabled) return;
     isEnabled = false;
+    isSessionActive = false;
+    document.removeEventListener('click', handleClick, { capture: true });
     document.removeEventListener('mousemove', handleMouseMove);
 
     const container = document.getElementById(CONTAINER_ID);

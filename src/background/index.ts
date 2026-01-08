@@ -2,7 +2,7 @@
 
 import { DEFAULT_SETTINGS, LexiLensSettings } from '../types';
 import { getSettings, saveSettings } from '../utils/storage';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 
 // Initialize default settings on installation
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -18,8 +18,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
 });
 
-// Context menus
-chrome.runtime.onInstalled.addListener(() => {
+
+// Context menu setup
+const setupContextMenus = () => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'lexilens-read-selection',
@@ -39,7 +40,13 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ['selection'],
     });
   });
+};
+
+chrome.runtime.onInstalled.addListener(() => {
+  // onInstalled handles both install and update (and reload in dev mode usually)
+  setupContextMenus();
 });
+
 
 // Helper to inject scripts safely
 const injectIrisScripts = (tabId: number) => {
@@ -116,12 +123,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FETCH_COMIC_FROM_BACKGROUND') {
     (async () => {
       try {
-        const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+        // const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+        // Temporary Debug: Hardcode check
+        const API_KEY = "AIzaSyCPurivlaBpWRQXEmSJES6H7EN0BuA2lTk";
 
         // Debug Log: Check if key is loaded (masked)
         console.log("[LexiLens] API Key detected:", API_KEY ? `${API_KEY.substring(0, 4)}... analytics check` : "MISSING");
 
-        if (!API_KEY || API_KEY === "YOUR_API_KEY_HERE" || API_KEY.trim() === "") {
+        if (!API_KEY || API_KEY.trim() === "") {
           console.error("Gemini API Key is missing or invalid.");
           sendResponse({ success: false, error: "MISSING_API_KEY: Please add VITE_GEMINI_API_KEY to your .env file and restart 'npm run dev'." });
           return;
@@ -131,7 +140,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // Use a function to try multiple models in case one is restricted/not found
         const tryGenerate = async (modelName: string) => {
-          const model = genAI.getGenerativeModel({ model: modelName });
+          const model = genAI.getGenerativeModel({
+            model: modelName,
+            safetySettings: [
+              { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            ]
+          });
 
           const styles = [
             '1930s Rubber Hose Animation (classic cartoon, bouncy, ink-blot)',
@@ -171,9 +188,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         };
 
         let response;
-        // User asked for "2.5", mapping to 2.0-flash-exp as the closest experimental version,
-        // followed by 1.5 variants and finally 1.0 pro.
-        const modelsToTry = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-pro"];
+        // User requested Gemini 2.5 Flash (Year 2026)
+        const modelsToTry = ["gemini-2.5-flash"];
+        let firstError: Error | null = null;
 
         for (const modelName of modelsToTry) {
           try {
@@ -182,15 +199,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (response) break; // Success!
           } catch (e: any) {
             console.warn(`[LexiLens] ${modelName} failed:`, e.message);
-            if (modelName === modelsToTry[modelsToTry.length - 1]) {
-              // If the last one failed, throw the error to be caught below
-              throw e;
-            }
+            // Capture the first error (usually the most relevant, e.g. quota or auth), 
+            // instead of showing the user the error from the last fallback model.
+            if (!firstError) firstError = e;
           }
         }
 
         if (!response) {
-          throw new Error("All models failed to generate content.");
+          throw firstError || new Error("All models failed to generate content.");
         }
         let textResponse = response.text();
         textResponse = textResponse.replace(/```svg/g, '').replace(/```/g, '').trim();

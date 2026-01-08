@@ -124,6 +124,7 @@ export const App: React.FC = () => {
       disableReadingFocus();
     }
 
+
     // Click to Read
     if (settings.audio.clickToRead) {
       enableClickToRead(settings.audio);
@@ -131,8 +132,9 @@ export const App: React.FC = () => {
       disableClickToRead();
     }
 
-    // Click Magnifier (Always enabled when extension is on)
-    enableClickMagnifier();
+    // Click Magnifier (Disabled by user request - too intrusive)
+    // enableClickMagnifier();
+    disableClickMagnifier();
 
   }, [settings, isLoading]);
 

@@ -1,227 +1,233 @@
-// Bionic Reading - Bold the first portion of words to guide the eye
-// Adapted from working implementation
 
 import { BionicReadingSettings } from '@/types';
 
 const PROCESSED_CLASS = 'lexilens-bionic-processed';
-let processingJob: number | null = null;
-let isEnabled = false;
+const STYLE_ID = 'lexilens-bionic-styles';
 
-/**
- * Get bionic formatted word with bold first portion
- */
+let isEnabled = false;
+let lastPercentage = 50;
+let observer: MutationObserver | null = null;
+let processingJob: number | null = null;
+
+function injectStyles() {
+  // Ensure styles are always present when enabled
+  let style = document.getElementById(STYLE_ID) as HTMLStyleElement;
+  if (!style) {
+    style = document.createElement('style');
+    style.id = STYLE_ID;
+    document.head.appendChild(style);
+  }
+  style.textContent = `
+    .${PROCESSED_CLASS} {
+        position: relative; /* Maintain layout */
+    }
+    .${PROCESSED_CLASS} b {
+        font-weight: 800 !important;
+        color: inherit !important;
+        background: transparent !important;
+    }
+    `;
+}
+
+function removeStyles() {
+  const style = document.getElementById(STYLE_ID);
+  if (style) style.remove();
+}
+
 function getBionicWord(word: string, boldPercentage: number): string {
   const len = word.length;
   if (len < 1) return word;
-  if (len === 1) return `<b>${word}</b>`;
 
-  // Calculate split point based on percentage
+  // Calculate split
   let splitPoint = Math.ceil(len * (boldPercentage / 100));
-  
-  // Ensure at least 1 character is bold
   if (splitPoint < 1) splitPoint = 1;
-  
-  // For very long words, cap at percentage to avoid visual clutter
-  if (len > 10) {
-    splitPoint = Math.max(1, Math.floor(len * (boldPercentage / 100)));
-  }
+  if (len > 15) splitPoint = Math.min(splitPoint, Math.ceil(len * 0.4));
 
-  return `<b>${word.slice(0, splitPoint)}</b>${word.slice(splitPoint)}`;
+  const boldPart = word.slice(0, splitPoint);
+  const restPart = word.slice(splitPoint);
+
+  return `<b>${boldPart}</b>${restPart}`;
 }
 
-/**
- * Process the page content for bionic reading
- */
-function processPage(boldPercentage: number): void {
-  // Cancel any ongoing job
-  if (processingJob) {
-    cancelAnimationFrame(processingJob);
-    processingJob = null;
-  }
+function processNode(textNode: Text, boldPercentage: number) {
+  if (!textNode.isConnected) return;
+  const val = textNode.nodeValue;
+  if (!val || !val.trim()) return;
 
-  // Walk the tree to collect text nodes
-  const walker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode: (node) => {
-        const parent = node.parentElement;
-        if (!parent) return NodeFilter.FILTER_REJECT;
+  const parent = textNode.parentElement;
+  if (!parent) return;
 
-        const tag = parent.tagName;
-        if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'SVG', 'IMG', 'CANVAS', 'VIDEO', 'AUDIO'].includes(tag)) {
-          return NodeFilter.FILTER_REJECT;
-        }
+  // Filter restricted tags
+  const tag = parent.tagName;
+  if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'SVG', 'IMG', 'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME'].includes(tag)) return;
+  if (parent.isContentEditable) return;
+  // Skip if already processed or inside our UI
+  if (parent.classList.contains(PROCESSED_CLASS)) return;
+  if (parent.closest('[data-lexilens]') || parent.closest('.lexilens-widget')) return;
 
-        // Content Editable protection
-        if (parent.isContentEditable) return NodeFilter.FILTER_REJECT;
+  // Filter non-word content
+  if (!/[a-zA-Z\u00C0-\u00FF]/.test(val)) return;
 
-        // Skip our own extension elements
-        if (parent.closest('[data-lexilens]') || parent.closest('.lexilens-widget') || parent.closest('#lexilens-root')) {
-          return NodeFilter.FILTER_REJECT;
-        }
+  const parts = val.split(/(\s+)/);
+  const fragment = document.createDocumentFragment();
+  let hasWork = false;
 
-        // Skip already processed
-        if (parent.classList.contains(PROCESSED_CLASS)) {
-          return NodeFilter.FILTER_REJECT;
-        }
-
-        if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT;
-
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    }
-  );
-
-  const nodesToProcess: Text[] = [];
-  while (walker.nextNode()) {
-    nodesToProcess.push(walker.currentNode as Text);
-  }
-
-  console.log(`[LexiLens] Bionic Reading: Found ${nodesToProcess.length} text nodes`);
-
-  // Process nodes in chunks using requestAnimationFrame
-  let index = 0;
-
-  const processChunk = () => {
-    if (!isEnabled) {
-      processingJob = null;
-      return;
+  for (const part of parts) {
+    if (!part.trim() || !/[a-zA-Z\u00C0-\u00FF]/.test(part)) {
+      fragment.appendChild(document.createTextNode(part));
+      continue;
     }
 
-    const startTime = performance.now();
+    hasWork = true;
+    const span = document.createElement('span');
+    span.className = PROCESSED_CLASS;
+    span.innerHTML = getBionicWord(part, boldPercentage);
+    fragment.appendChild(span);
+  }
 
-    // Process for max 10ms per frame to keep UI responsive
-    while (index < nodesToProcess.length && performance.now() - startTime < 10) {
-      const textNode = nodesToProcess[index++];
+  if (hasWork) {
+    textNode.replaceWith(fragment);
+  }
+}
 
-      // Double check it's still in DOM
-      if (!textNode.isConnected) continue;
+// Global function to start observing AFTER initial batch
+function enableObserver(boldPercentage: number) {
+  if (observer) observer.disconnect();
 
-      const text = textNode.nodeValue || '';
-      
-      // Split keeping whitespace as delimiters
-      const parts = text.split(/(\s+)/);
+  observer = new MutationObserver((mutations) => {
+    // Stop observing briefly to prevent loop
+    observer?.disconnect();
 
-      const fragment = document.createDocumentFragment();
-      let changed = false;
+    const nodes: Text[] = [];
+    mutations.forEach(m => {
+      m.addedNodes.forEach(n => {
+        if (n.nodeType === Node.TEXT_NODE) nodes.push(n as Text);
+        else if (n.nodeType === Node.ELEMENT_NODE) {
+          const el = n as HTMLElement;
+          if (el.classList.contains(PROCESSED_CLASS)) return; // Ignore our own nodes
 
-      parts.forEach(part => {
-        // If it's whitespace, just add it as text
-        if (!part.trim()) {
-          fragment.appendChild(document.createTextNode(part));
-          return;
-        }
-
-        // Check if the part contains letters (words to process)
-        if (/[a-zA-Z]/.test(part)) {
-          changed = true;
-          const span = document.createElement('span');
-          span.className = PROCESSED_CLASS;
-          span.innerHTML = getBionicWord(part, boldPercentage);
-          fragment.appendChild(span);
-        } else {
-          // Non-letter content (numbers, symbols)
-          fragment.appendChild(document.createTextNode(part));
+          const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) nodes.push(walker.currentNode as Text);
         }
       });
+    });
 
-      if (changed && textNode.parentNode) {
-        textNode.replaceWith(fragment);
-      }
+    // Fast process
+    nodes.forEach(n => processNode(n, boldPercentage));
+
+    // Resume
+    if (isEnabled) {
+      observer?.observe(document.body, { childList: true, subtree: true });
+    }
+  });
+
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function processPage(boldPercentage: number) {
+  // 1. Collect all valid text nodes
+  const nodes: Text[] = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const p = node.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      if (['SCRIPT', 'STYLE'].includes(p.tagName)) return NodeFilter.FILTER_REJECT;
+      if (p.closest && (p.closest('[data-lexilens]') || p.closest('.lexilens-widget'))) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+
+  while (walker.nextNode()) {
+    nodes.push(walker.currentNode as Text);
+  }
+
+  console.log(`[LexiLens] Processing ${nodes.length} text nodes...`);
+
+  // 2. Process in chunks without observer interference
+  let index = 0;
+  const processChunk = () => {
+    if (!isEnabled) return; // Cancel if disabled during processing
+
+    const start = performance.now();
+    // Budget 12ms
+    while (index < nodes.length && performance.now() - start < 12) {
+      processNode(nodes[index++], boldPercentage);
     }
 
-    if (index < nodesToProcess.length && isEnabled) {
+    if (index < nodes.length) {
       processingJob = requestAnimationFrame(processChunk);
     } else {
+      console.log('[LexiLens] Initial processing complete. Enabling observer.');
       processingJob = null;
-      console.log('[LexiLens] Bionic Reading: Processing complete');
+      enableObserver(boldPercentage);
     }
   };
 
   processingJob = requestAnimationFrame(processChunk);
 }
 
-/**
- * Revert all bionic reading changes
- */
-function revertChanges(): void {
-  // Cancel any ongoing processing
+function revertChanges() {
+  if (observer) observer.disconnect();
   if (processingJob) {
     cancelAnimationFrame(processingJob);
     processingJob = null;
   }
 
-  // Find all our processed spans
   const processed = document.querySelectorAll(`.${PROCESSED_CLASS}`);
-
-  // Collect parents to normalize after
-  const parents = new Set<HTMLElement>();
-  
   processed.forEach(span => {
-    if (span.parentElement) parents.add(span.parentElement);
-    // Replace span with its text content
-    const text = span.textContent || '';
-    span.replaceWith(document.createTextNode(text));
-  });
-
-  // Normalize parents to merge adjacent text nodes back into one
-  parents.forEach(parent => {
-    try {
+    // Fast unwrap
+    const parent = span.parentNode;
+    if (parent) {
+      const txt = document.createTextNode(span.textContent || '');
+      parent.replaceChild(txt, span);
       parent.normalize();
-    } catch (e) {
-      // Ignore errors from detached nodes
     }
   });
 }
 
-/**
- * Enable bionic reading
- */
 export function enableBionicReading(settings: BionicReadingSettings): void {
+  const percentage = settings.boldPercentage;
+  injectStyles();
+
   if (isEnabled) {
-    // Already enabled, just update
+    if (percentage !== lastPercentage) {
+      updateBionicReading(settings);
+    }
     return;
   }
-  
+
   isEnabled = true;
-  console.log(`[LexiLens] Enabling Bionic Reading (${settings.boldPercentage}% bold)`);
-  
-  // Small delay to allow page to settle
-  setTimeout(() => {
+  lastPercentage = percentage;
+
+  // Important: Revert first to ensure clean slab if we had partial state
+  // revertChanges(); // Actually no, that might flash. Just process.
+
+  processPage(percentage);
+}
+
+export function disableBionicReading(): void {
+  if (!isEnabled) return;
+  isEnabled = false;
+  revertChanges();
+  removeStyles();
+}
+
+export function updateBionicReading(settings: BionicReadingSettings): void {
+  if (!isEnabled) return;
+
+  // For slider updates, we MUST revert old bolding first to apply new percentage
+  revertChanges();
+  lastPercentage = settings.boldPercentage;
+  injectStyles(); // Ensure style exists
+
+  // Wait for next frame to avoid jank
+  requestAnimationFrame(() => {
     if (isEnabled) {
       processPage(settings.boldPercentage);
     }
-  }, 100);
+  });
 }
 
-/**
- * Disable bionic reading and restore original content
- */
-export function disableBionicReading(): void {
-  console.log('[LexiLens] Disabling Bionic Reading');
-  isEnabled = false;
-  revertChanges();
-}
-
-/**
- * Update bionic reading settings
- */
-export function updateBionicReading(settings: BionicReadingSettings): void {
-  if (isEnabled && settings.enabled) {
-    // Revert and re-apply with new settings
-    revertChanges();
-    setTimeout(() => {
-      if (isEnabled) {
-        processPage(settings.boldPercentage);
-      }
-    }, 50);
-  }
-}
-
-/**
- * Check if bionic reading is active
- */
 export function isBionicReadingActive(): boolean {
   return isEnabled;
 }

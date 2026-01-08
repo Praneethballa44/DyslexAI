@@ -26,7 +26,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/index.tsx-loader-BAapqTWx.js"
+        "assets/index.tsx-loader-Mix8ngvX.js"
       ],
       "matches": [
         "<all_urls>"
@@ -61,7 +61,7 @@
         "mediapipe/*",
         "assets/client-C3Mcq2Xm.js",
         "assets/storage-BT_x06Oc.js",
-        "assets/index.tsx-haQkKd7a.js"
+        "assets/index.tsx-BMHep4fj.js"
       ],
       "use_dynamic_url": false
     }
